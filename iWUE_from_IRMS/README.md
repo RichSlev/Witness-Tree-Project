@@ -69,3 +69,13 @@ colmap <- list(
   d13C_leaf = "d13C",
   date      = "Date"
 )
+
+
+## Citation
+
+If you use or adapt this workflow, please cite:
+
+Soh, W. K., et al. (2019).
+Rising CO₂ drives divergence in water use efficiency of evergreen and deciduous plants.
+Science Advances, 5(12), eaax7906.
+https://doi.org/10.1126/sciadv.aax7906
