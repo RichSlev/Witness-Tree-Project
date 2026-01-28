@@ -1,0 +1,211 @@
+---
+title: "EA-IRMS output for intrinsic Water Use Efficiency (iWUE)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+## Overview
+
+This document converts bulk leaf carbon isotope measurements (δ¹³C, VPDB) from a Thermo EA-IRMS export into intrinsic water use efficiency (iWUE) using the standard carbon isotope discrimination framework.
+
+The workflow follows the same mathematical pathway used in Soh et al. (2019):
+
+δ¹³C_leaf → Δ¹³C → ci/ca → iWUE
+
+Steps:
+1. Read Thermo EA-IRMS output and atmospheric reference data  
+2. Standardise column names and parse dates  
+3. Join atmospheric CO₂ concentration and δ¹³C of air  
+4. Compute Δ¹³C, ci/ca, and iWUE  
+5. Visualise and summarise results  
+6. Optionally export a results table  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(lubridate)
+
+1. File paths and data import
+
+Specify the paths to:
+
+The Thermo EA-IRMS export file
+
+An atmospheric reference table containing year, atmospheric CO₂ concentration (ca), and atmospheric δ¹³C
+
+irms_file <- "data/thermo_irms_output.csv"
+atm_file  <- "data/atmosphere_co2_d13c_by_year.csv"
+
+
+Read both datasets and standardise the atmospheric table.
+
+irms_raw <- readr::read_csv(irms_file, show_col_types = FALSE)
+
+atm <- readr::read_csv(atm_file, show_col_types = FALSE) %>%
+  mutate(year = as.integer(year)) %>%
+  arrange(year)
+
+glimpse(irms_raw)
+glimpse(atm)
+
+2. Standardising Thermo EA-IRMS columns
+
+Thermo exports vary by lab and template.
+Define a mapping from your file’s headers to standard variable names.
+
+Edit the strings on the right-hand side to match your Thermo file exactly.
+
+colmap <- list(
+  sample_id = "Identifier",  # sample identifier
+  d13C_leaf = "d13C",        # δ13C of leaf organic matter (per mil, VPDB)
+  date      = "Date"         # sampling date (preferred)
+)
+
+pick_col <- function(df, nm) {
+  if (!nm %in% names(df)) stop("Missing column: ", nm)
+  df[[nm]]
+}
+
+
+Build a clean IRMS table with parsed dates and sampling year.
+
+irms <- irms_raw %>%
+  transmute(
+    sample_id = as.character(pick_col(irms_raw, colmap$sample_id)),
+    d13C_leaf = suppressWarnings(as.numeric(pick_col(irms_raw, colmap$d13C_leaf))),
+    date_raw  = pick_col(irms_raw, colmap$date)
+  ) %>%
+  mutate(
+    date = suppressWarnings(ymd(date_raw)),
+    date = if_else(is.na(date), suppressWarnings(dmy(date_raw)), date),
+    date = if_else(is.na(date), suppressWarnings(mdy(date_raw)), date),
+    year = if_else(!is.na(date), year(date), NA_integer_)
+  )
+
+stopifnot("year" %in% names(irms))
+
+summary(irms$d13C_leaf)
+count(irms, year, sort = TRUE)
+
+
+Extract date from the sample ID.
+
+irms <- irms %>%
+  mutate(year = if_else(
+    is.na(year),
+    as.integer(stringr::str_extract(sample_id, "(19|20)\\d{2}")),
+    year
+  ))
+
+3. Join atmospheric CO₂ and δ¹³C of air
+
+Atmospheric inputs are required to compute discrimination.
+Here we join by year (a simplified but common approach).
+
+Constants from Farquhar discrimination theory:
+
+a = 4.4‰ (diffusion)
+
+b = 27‰ (Rubisco carboxylation)
+
+a <- 4.4
+b <- 27.0
+
+df <- irms %>%
+  left_join(atm, by = "year") %>%
+  mutate(
+    ca_ppm   = as.numeric(ca_ppm),
+    d13C_atm = as.numeric(d13C_atm),
+    ok_inputs = !is.na(d13C_leaf) & !is.na(ca_ppm) & !is.na(d13C_atm)
+  )
+
+count(df, ok_inputs)
+
+4. Calculate Δ¹³C, ci/ca, and iWUE
+
+Core equations:
+
+Δ¹³C = (δ¹³C_air − δ¹³C_leaf) / (1 + δ¹³C_leaf / 1000)
+
+ci/ca = (Δ¹³C − a) / (b − a)
+
+iWUE = ca × (1 − ci/ca) / 1.6
+
+df_iwue <- df %>%
+  mutate(
+    Delta13C = (d13C_atm - d13C_leaf) / (1 + d13C_leaf / 1000),
+    ci_ca    = (Delta13C - a) / (b - a),
+    iWUE     = ca_ppm * (1 - ci_ca) / 1.6
+  ) %>%
+  mutate(
+    ci_ca_flag = case_when(
+      is.na(ci_ca) ~ "NA",
+      ci_ca < 0    ~ "<0 (check inputs)",
+      ci_ca > 1    ~ ">1 (check inputs)",
+      TRUE         ~ "ok"
+    )
+  )
+
+df_iwue %>%
+  select(sample_id, year, d13C_leaf, d13C_atm, ca_ppm, Delta13C, ci_ca, iWUE, ci_ca_flag) %>%
+  arrange(year, sample_id) %>%
+  print(n = 25)
+
+count(df_iwue, ci_ca_flag)
+
+5. Visual sanity checks
+
+These plots help identify:
+
+Missing atmospheric joins
+
+Implausible ci/ca values
+
+Extreme iWUE outliers
+
+ggplot(df_iwue %>% filter(ok_inputs), aes(x = year, y = iWUE)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    x = "Year",
+    y = "iWUE (derived from δ13C)",
+    title = "Intrinsic water use efficiency by year"
+  )
+
+ggplot(df_iwue %>% filter(ok_inputs), aes(x = year, y = ci_ca)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    x = "Year",
+    y = "ci/ca",
+    title = "Inferred ci/ca by year"
+  )
+
+6. Annual summaries
+df_iwue %>%
+  filter(ok_inputs) %>%
+  group_by(year) %>%
+  summarise(
+    n = n(),
+    iWUE_mean  = mean(iWUE, na.rm = TRUE),
+    iWUE_sd    = sd(iWUE, na.rm = TRUE),
+    ci_ca_mean = mean(ci_ca, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  print(n = Inf)
+
+7. Export results
+
+This writes a full table including Δ¹³C and ci/ca for transparency and reuse.
+
+Kept as eval = FALSE so knitting does not fail if the directory does not exist.
+
+dir.create("outputs", showWarnings = FALSE, recursive = TRUE)
+readr::write_csv(df_iwue, "outputs/irms_to_iwue_results.csv")
+
+
